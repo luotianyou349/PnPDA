@@ -1,0 +1,187 @@
+name: pp8_pp4_cpm_cobevt
+root_dir: 'dataset/train'
+validate_dir: 'dataset/validate'
+model_dir: 'model/'
+
+yaml_parser: "load_pp_pp_params"
+train_params:
+  batch_size: &batch_size 4
+  epoches: 50
+  eval_freq: 1
+  save_freq: 1
+  max_cav: &max_cav 5
+
+fusion:
+  core_method: 'IntermediateFusionDatasetV3' # LateFusionDataset, EarlyFusionDataset, IntermediateFusionDataset supported
+  args: 
+    same_data: false
+    full_data: false
+    flip_data: true
+    is_augment: false
+
+# preprocess-related
+preprocess_q:
+  # options: BasePreprocessor, VoxelPreprocessor, BevPreprocessor
+  core_method: 'SpVoxelPreprocessor'
+  args:
+    voxel_size: &voxel_size_q [0.8, 0.8, 4]
+    max_points_per_voxel: 32
+    max_voxel_train: 32000
+    max_voxel_test: 70000
+  # lidar range for each individual cav.
+  cav_lidar_range: &cav_lidar [-140.8, -40, -3, 140.8, 40, 1]
+  
+preprocess_k:
+  # options: BasePreprocessor, VoxelPreprocessor, BevPreprocessor
+  core_method: 'SpVoxelPreprocessor'
+  args:
+    voxel_size: &voxel_size_k [0.4, 0.4, 4]
+    max_points_per_voxel: 32
+    max_voxel_train: 32000
+    max_voxel_test: 70000
+  # lidar range for each individual cav.
+  cav_lidar_range: *cav_lidar
+
+data_augment:
+  - NAME: random_world_flip
+    ALONG_AXIS_LIST: [ 'x' ]
+
+  - NAME: random_world_rotation
+    WORLD_ROT_ANGLE: [ -0.78539816, 0.78539816 ]
+
+  - NAME: random_world_scaling
+    WORLD_SCALE_RANGE: [ 0.95, 1.05 ]
+
+# anchor box related
+postprocess:
+  core_method: 'VoxelPostprocessor' # VoxelPostprocessor, BevPostprocessor supported
+  anchor_args:
+    cav_lidar_range: *cav_lidar
+    l: 3.9
+    w: 1.6
+    h: 1.56
+    r: [0, 90]
+    feature_stride: 2
+    num: &achor_num 2
+  target_args:
+    pos_threshold: 0.6
+    neg_threshold: 0.45
+    score_threshold: 0.20
+  voxel_size: *voxel_size_q
+  cav_lidar_range: *cav_lidar
+  order: 'hwl' # hwl or lwh
+  max_num: 100 # maximum number of objects in a single frame. use this number to make sure different frames has the same dimension in the same batch
+  nms_thresh: 0.15
+
+# model related
+model:
+  core_method: cpm
+  pre_train_modules: opencood/pre_train_modules/pp8_pp4_cpm.pth
+  args:
+    PROJ_QUERY: true
+    USE_PRED: false  
+    encoder_q:
+      core_method: point_pillar_encoder
+      saved_pth: opencood/pre_train_modules/point_pillar_xyres8.pth
+      args:
+        voxel_size: *voxel_size_q
+        lidar_range: *cav_lidar
+        anchor_number: *achor_num
+        max_cav: *max_cav
+        channel: &c_q 256
+        featrue_size: &s_q [50,176]
+
+        pillar_vfe:
+          use_norm: true
+          with_distance: false
+          use_absolute_xyz: true
+          num_filters: [64]
+          
+        point_pillar_scatter:
+          num_features: 64
+
+        base_bev_backbone:
+          layer_nums: [3, 5]
+          layer_strides: [2, 2]
+          num_filters: [64, 128]
+          upsample_strides: [1, 2]
+          num_upsample_filter: [128, 128]
+
+    encoder_k:
+      core_method: point_pillar_encoder
+      saved_pth: opencood/pre_train_modules/point_pillar_xyres4.pth
+      args:
+        voxel_size: *voxel_size_k
+        lidar_range: *cav_lidar
+        anchor_number: *achor_num
+        max_cav: *max_cav
+        channel: &c_k 384
+        featrue_size: &s_k [100,352]
+
+        pillar_vfe:
+          use_norm: true
+          with_distance: false
+          use_absolute_xyz: true
+          num_filters: [64]
+          
+        point_pillar_scatter:
+          num_features: 64
+
+        base_bev_backbone:
+          layer_nums: [3, 5, 8]
+          layer_strides: [2, 2, 2]
+          num_filters: [64, 128, 256]
+          upsample_strides: [1, 2, 4]
+          num_upsample_filter: [128, 128, 128]
+      
+    compressor:
+      in_channel: *c_k
+      in_size: *s_k
+      featrue_size: *s_q
+      channel: *c_q
+    
+    projector:
+      num_layers: 1
+      num_heads: 16
+      d_ff: 512
+      d_model: *c_q
+      dropout: 0.1
+
+    predictor:
+      num_layers: 1
+      num_heads: 16
+      d_model: *c_q
+      d_ff: 256
+    
+    fusion_net:
+      core_method: cobevt
+      input_dim: 256
+      mlp_dim: 256
+      agent_size: 2
+      window_size: 2
+      dim_head: 32
+      drop_out: 0.1
+      depth: 3
+      mask: true
+      
+    anchor_num: *achor_num
+    momentum: 0.8
+
+loss:
+  core_method: point_pillar_loss
+  args:
+    cls_weight: 1.0
+    reg: 2.0
+
+optimizer:
+  core_method: Adam
+  lr: 0.001
+  args:
+    eps: 1e-10
+    weight_decay: 1e-4
+
+lr_scheduler:
+  core_method: multistep #step, multistep and Exponential support
+  gamma: 0.1
+  step_size: [10, 50, 80]
+
